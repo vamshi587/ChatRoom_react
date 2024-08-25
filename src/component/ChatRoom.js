@@ -7,7 +7,7 @@ var stompClient = null;
 const ChatRoom = () => {
     const [privateChats, setPrivateChats] = useState(new Map());
     const [publicChats, setPublicChats] = useState([]);
-    const [onlineUsers, setOnlineUsers] = useState(new Map()); // Track online users with Map
+    const [onlineUsers, setOnlineUsers] = useState(new Set()); // Track online users
     const [tab, setTab] = useState("CHATROOM");
     const [userData, setUserData] = useState({
         username: '',
@@ -24,7 +24,7 @@ const ChatRoom = () => {
                 window.removeEventListener("beforeunload", handleBeforeUnload);
             }
         };
-    }, [userData.connected]);
+    }, [userData]);
 
     const handleBeforeUnload = () => {
         leaveChat();
@@ -40,7 +40,6 @@ const ChatRoom = () => {
         setUserData({ ...userData, "connected": true });
         stompClient.subscribe('/chatroom/public', onMessageReceived);
         stompClient.subscribe('/user/' + userData.username + '/private', onPrivateMessage);
-        stompClient.subscribe('/chatroom/users', onUsersListUpdate); // Subscribe to the users list updates
         userJoin();
     };
 
@@ -64,39 +63,37 @@ const ChatRoom = () => {
         var payloadData = JSON.parse(payload.body);
         switch (payloadData.status) {
             case "JOIN":
-                setOnlineUsers(prevState => new Map(prevState).set(payloadData.senderName, true));
+                if (!privateChats.get(payloadData.senderName)) {
+                    privateChats.set(payloadData.senderName, []);
+                    setPrivateChats(new Map(privateChats));
+                }
+                setOnlineUsers(prevState => new Set([...prevState, payloadData.senderName]));
                 break;
             case "LEAVE":
                 setOnlineUsers(prevState => {
-                    const newMap = new Map(prevState);
-                    newMap.delete(payloadData.senderName);
-                    return newMap;
+                    const newSet = new Set(prevState);
+                    newSet.delete(payloadData.senderName);
+                    return newSet;
                 });
                 break;
             case "MESSAGE":
-                setPublicChats(prevChats => [...prevChats, payloadData]);
+                publicChats.push(payloadData);
+                setPublicChats([...publicChats]);
                 break;
-            default:
-                console.error("Unknown status:", payloadData.status);
         }
     };
 
     const onPrivateMessage = (payload) => {
         var payloadData = JSON.parse(payload.body);
-        setPrivateChats(prevChats => {
-            const updatedChats = new Map(prevChats);
-            if (updatedChats.get(payloadData.senderName)) {
-                updatedChats.get(payloadData.senderName).push(payloadData);
-            } else {
-                updatedChats.set(payloadData.senderName, [payloadData]);
-            }
-            return updatedChats;
-        });
-    };
-
-    const onUsersListUpdate = (payload) => {
-        const users = JSON.parse(payload.body);
-        setOnlineUsers(new Map(users.map(user => [user, true])));
+        if (privateChats.get(payloadData.senderName)) {
+            privateChats.get(payloadData.senderName).push(payloadData);
+            setPrivateChats(new Map(privateChats));
+        } else {
+            let list = [];
+            list.push(payloadData);
+            privateChats.set(payloadData.senderName, list);
+            setPrivateChats(new Map(privateChats));
+        }
     };
 
     const onError = (err) => {
@@ -129,17 +126,10 @@ const ChatRoom = () => {
                 status: "MESSAGE"
             };
 
-            setPrivateChats(prevChats => {
-                const updatedChats = new Map(prevChats);
-                if (userData.username !== tab) {
-                    if (updatedChats.get(tab)) {
-                        updatedChats.get(tab).push(chatMessage);
-                    } else {
-                        updatedChats.set(tab, [chatMessage]);
-                    }
-                }
-                return updatedChats;
-            });
+            if (userData.username !== tab) {
+                privateChats.get(tab).push(chatMessage);
+                setPrivateChats(new Map(privateChats));
+            }
             stompClient.send("/app/private-message", {}, JSON.stringify(chatMessage));
             setUserData({ ...userData, "message": "" });
         }
@@ -151,11 +141,26 @@ const ChatRoom = () => {
     };
 
     const registerUser = () => {
-        if (userData.username.trim()) { // Ensure the username is not empty
-            connect();
-        } else {
-            alert("Please enter a username.");
+        connect();
+    };
+
+    const getInitials = (name) => {
+        if (!name) return '';
+        const parts = name.split(' ');
+        if (parts.length === 1) {
+            return parts[0].charAt(0).toUpperCase();
         }
+        return parts[0].charAt(0).toUpperCase() + (parts[1] ? parts[1].charAt(0).toUpperCase() : '');
+    };
+
+    const getColor = (name) => {
+        const colors = ["#FF5733", "#33FF57", "#5733FF", "#FFC300", "#FF33A6", "#A6FF33"];
+        let hash = 0;
+        for (let i = 0; i < name.length; i++) {
+            hash = name.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const colorIndex = Math.abs(hash % colors.length);
+        return colors[colorIndex];
     };
 
     return (
@@ -172,9 +177,13 @@ const ChatRoom = () => {
                             <li onClick={() => { setTab("CHATROOM") }} className={`member ${tab === "CHATROOM" && "active"}`}>
                                 Chatroom
                             </li>
-                            {[...onlineUsers.keys()].map((name, index) => (
+                            {[...privateChats.keys()].map((name, index) => (
                                 <li onClick={() => { setTab(name) }} className={`member ${tab === name && "active"}`} key={index}>
-                                    {name} {onlineUsers.has(name) ? <span className="online-indicator">🟢</span> : <span className="offline-indicator">🔴</span>}
+                                    <div className="member-info" style={{ backgroundColor: getColor(name) }}>
+                                        <span className="member-initials">{getInitials(name)}</span>
+                                        <span className="member-name">{name}</span>
+                                    </div>
+                                    {onlineUsers.has(name) ? <span className="online-indicator">🟢</span> : <span className="offline-indicator">🔴</span>}
                                 </li>
                             ))}
                         </ul>
@@ -183,32 +192,38 @@ const ChatRoom = () => {
                         <ul className="chat-messages">
                             {publicChats.map((chat, index) => (
                                 <li className={`message ${chat.senderName === userData.username && "self"}`} key={index}>
-                                    {chat.senderName !== userData.username && <div className="avatar">{chat.senderName}</div>}
-                                    <div className="message-data">{chat.message}</div>
-                                    {chat.senderName === userData.username && <div className="avatar self">{chat.senderName}</div>}
+                                    {chat.senderName !== userData.username && <div className="avatar" style={{ backgroundColor: getColor(chat.senderName) }}>{getInitials(chat.senderName)}</div>}
+                                    <div className="message-data">
+                                        <span className="message-text">{chat.message}</span>
+                                        {chat.date && <span className="message-date">{new Date(chat.date).toLocaleTimeString()}</span>}
+                                    </div>
+                                    {chat.senderName === userData.username && <div className="avatar self" style={{ backgroundColor: getColor(chat.senderName) }}>{getInitials(chat.senderName)}</div>}
                                 </li>
                             ))}
                         </ul>
 
                         <div className="send-message">
-                            <input type="text" className="input-message" placeholder="Enter the message" value={userData.message} onChange={handleMessage} />
-                            <button type="button" className="send-button" onClick={sendValue}>Send</button>
+                            <input type="text" className="input-message" placeholder="enter the message" value={userData.message} onChange={handleMessage} />
+                            <button type="button" className="send-button" onClick={sendValue}>send</button>
                         </div>
                     </div>}
                     {tab !== "CHATROOM" && <div className="chat-content">
                         <ul className="chat-messages">
-                            {[...privateChats.get(tab) || []].map((chat, index) => (
+                            {[...privateChats.get(tab)].map((chat, index) => (
                                 <li className={`message ${chat.senderName === userData.username && "self"}`} key={index}>
-                                    {chat.senderName !== userData.username && <div className="avatar">{chat.senderName}</div>}
-                                    <div className="message-data">{chat.message}</div>
-                                    {chat.senderName === userData.username && <div className="avatar self">{chat.senderName}</div>}
+                                    {chat.senderName !== userData.username && <div className="avatar" style={{ backgroundColor: getColor(chat.senderName) }}>{getInitials(chat.senderName)}</div>}
+                                    <div className="message-data">
+                                        <span className="message-text">{chat.message}</span>
+                                        {chat.date && <span className="message-date">{new Date(chat.date).toLocaleTimeString()}</span>}
+                                    </div>
+                                    {chat.senderName === userData.username && <div className="avatar self" style={{ backgroundColor: getColor(chat.senderName) }}>{getInitials(chat.senderName)}</div>}
                                 </li>
                             ))}
                         </ul>
 
                         <div className="send-message">
-                            <input type="text" className="input-message" placeholder="Enter the message" value={userData.message} onChange={handleMessage} />
-                            <button type="button" className="send-button" onClick={sendPrivateValue}>Send</button>
+                            <input type="text" className="input-message" placeholder="enter the message" value={userData.message} onChange={handleMessage} />
+                            <button type="button" className="send-button" onClick={sendPrivateValue}>send</button>
                         </div>
                     </div>}
                 </div>
@@ -223,7 +238,7 @@ const ChatRoom = () => {
                         margin="normal"
                     />
                     <button type="button" onClick={registerUser}>
-                        Connect
+                        connect
                     </button>
                 </div>}
         </div>
